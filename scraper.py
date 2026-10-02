@@ -40,16 +40,19 @@ def limpiar_titulo(titulo_raw: str) -> str:
     return f"{titulo_limpio} [Clave: www.elenemigos.com]"
 
 def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
-    """Carga el pastebin manteniendo el hash # exacto para descifrar el contenido."""
+    """Carga el pastebin usando domcontentloaded para evitar los timeouts de red."""
     enlaces_encontrados = []
     
-    # Limpiar cualquier caracter como ':' al final de la URL del Pastebin
+    # Limpiar cualquier caracter parásito al final de la URL
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
     print(f"  -> Abriendo Pastebin limpio: {url_pastebin}")
     
     try:
-        page.goto(url_pastebin, timeout=25000, wait_until="networkidle")
-        page.wait_for_timeout(3500)
+        # domcontentloaded evita que Playwright se quede colgado esperando a que la red esté en reposo
+        page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
+        
+        # Espera de 4 segundos para asegurar que el JS de PrivateBin descifre el texto
+        page.wait_for_timeout(4000)
 
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
@@ -61,7 +64,7 @@ def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
                 if href not in enlaces_encontrados:
                     enlaces_encontrados.append(href)
 
-        # 2. URLs en el texto plano del cuerpo desencriptado
+        # 2. URLs en el texto plano desencriptado
         texto_visible = page.inner_text("body")
         urls_texto = re.findall(r'https?://[^\s<>"]+', texto_visible)
         for u in urls_texto:
@@ -118,16 +121,15 @@ def extraer_datos_juego(page, url_juego: str) -> dict | None:
                     enlaces.append(href_clean)
                 continue
 
-            # Detectar enlaces al pastebin y eliminar dos puntos parásitos al final
+            # Detectar enlaces al pastebin sin recortar la clave de descifrado (#hash)
             if PASTE_DOMAIN in href or "/paste" in href.lower():
                 if not href.startswith("http"):
                     href = "https://" + href if href.startswith(PASTE_DOMAIN) else BASE_URL + href
                 
-                # Limpiar caracteres como ':' al final de la URL del pastebin
                 href_limpio = href.rstrip(";:,. \"'")
                 pastes_a_procesar.add(href_limpio)
 
-        # Procesar los Pastebins encontrados con Playwright
+        # Procesar los Pastebins encontrados mediante Playwright
         for url_paste in pastes_a_procesar:
             enlaces_paste = extraer_enlaces_de_pastebin(page, url_paste)
             for ep in enlaces_paste:
@@ -178,7 +180,7 @@ def obtener_urls_juegos() -> list[str]:
     return list(urls)
 
 def generar_json():
-    print("Iniciando extracción con limpieza de caracteres al final de las URLs...")
+    print("Iniciando extracción optimizada con Playwright...")
     descargas_acumuladas = {}
 
     urls = obtener_urls_juegos()
