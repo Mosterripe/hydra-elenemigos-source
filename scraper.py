@@ -40,57 +40,42 @@ def limpiar_titulo(titulo_raw: str) -> str:
     return f"{titulo_limpio} [Clave: www.elenemigos.com]"
 
 def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
-    """Carga el pastebin y extrae el texto desde textareas, pres y contenedores JS."""
+    """Carga el pastebin y extrae el contenido descifrado de la memoria de la pagina."""
     enlaces_encontrados = []
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
     print(f"  -> Abriendo Pastebin: {url_pastebin}")
     
     try:
-        page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
+        # Cargar la página
+        response = page.goto(url_pastebin, timeout=25000, wait_until="domcontentloaded")
         
-        # Intentar hacer clic si hay un botón de confirmación o descifrado en la pantalla
-        try:
-            page.click("button:has-text('Decrypt')", timeout=1500)
-        except Exception:
-            pass
-        try:
-            page.click("button:has-text('Ver')", timeout=1500)
-        except Exception:
-            pass
+        # Esperar 5 segundos para asegurar la ejecucion del JS de descifrado
+        page.wait_for_timeout(5000)
 
-        # Esperar 4.5 segundos a que la desencriptación en JS finalice
-        page.wait_for_timeout(4500)
+        # 1. Extraer mediante Javascript ejecutado en la consola de la pagina
+        texto_desencriptado = page.evaluate("""() => {
+            let texto = "";
+            // Elementos tipicos donde PrivateBin/Pastebin coloca el texto libre
+            let elClear = document.querySelector('#cleartext') || document.querySelector('#deletelink') || document.querySelector('#pastebytes');
+            if (elClear) texto += " " + (elClear.innerText || elClear.value || "");
+            
+            let elPre = document.querySelectorAll('pre, code, textarea');
+            elPre.forEach(e => texto += " " + (e.innerText || e.value || ""));
+            
+            return texto + " " + document.body.innerText;
+        }""")
 
-        # 1. Extraer desde el DOM del navegador (texto interno del body y inputs/textareas)
-        body_text = page.inner_text("body")
-        
-        # Búsqueda en el texto visible del navegador
-        for server in SERVIDORES_DESCARGA:
-            patron = r'https?://[^\s<>"]*' + re.escape(server) + r'[^\s<>"]*'
-            encontrados = re.findall(patron, body_text, re.IGNORECASE)
-            for e in encontrados:
-                e_clean = e.rstrip(";:,. \"'")
-                if e_clean not in enlaces_encontrados:
-                    enlaces_encontrados.append(e_clean)
-
-        # 2. Extraer de elementos específicos: textarea, pre, code
-        elementos_texto = page.eval_on_selector_all(
-            "textarea, pre, code, div.clear, div.post-text", 
-            "nodes => nodes.map(n => n.innerText || n.value)"
-        )
-        bloque_completo = " ".join(elementos_texto) + " " + page.content()
-
-        # Búsqueda mediante expresiones regulares en todo el HTML y elementos
+        # 2. Buscar coincidencias de nuestros servidores en el texto extraido
         patron_general = r'https?://[^\s<>"]+'
-        urls_general = re.findall(patron_general, bloque_completo)
+        urls_general = re.findall(patron_general, texto_desencriptado)
         for u in urls_general:
             u_clean = u.rstrip(";:,. \"'")
             if any(s in u_clean.lower() for s in SERVIDORES_DESCARGA):
                 if u_clean not in enlaces_encontrados:
                     enlaces_encontrados.append(u_clean)
 
-        # 3. Magnet links
-        magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s<>"]*', bloque_completo)
+        # 3. Buscar enlaces Magnet
+        magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s<>"]*', texto_desencriptado)
         for m in magnets:
             m_clean = m.rstrip(";:,. \"'")
             if m_clean not in enlaces_encontrados:
@@ -137,7 +122,7 @@ def extraer_datos_juego(page, url_juego: str) -> dict | None:
                     enlaces.append(href_clean)
                 continue
 
-            # Detectar enlaces al subdominio paste.elenemigos.com o rutas de paste
+            # Detectar enlaces al subdominio paste.elenemigos.com
             if PASTE_DOMAIN in href or "/paste" in href.lower():
                 if not href.startswith("http"):
                     href = "https://" + href if href.startswith(PASTE_DOMAIN) else BASE_URL + href
@@ -196,15 +181,20 @@ def obtener_urls_juegos() -> list[str]:
     return list(urls)
 
 def generar_json():
-    print("Iniciando extracción con análisis profundo del DOM de Pastebin...")
+    print("Iniciando extracción con perfil de navegador completo...")
     descargas_acumuladas = {}
 
     urls = obtener_urls_juegos()
     print(f"URLs de juegos encontradas: {len(urls)}")
 
     with sync_playwright() as p:
+        # Lanzar Chromium configurando un User-Agent de navegador real para evitar bloqueos
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 720}
+        )
+        page = context.new_page()
 
         for url in urls:
             print(f"Procesando juego: {url}")
