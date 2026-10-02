@@ -1,7 +1,6 @@
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -10,6 +9,7 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "https://elenemigos.com"
 PASTE_DOMAIN = "paste.elenemigos.com"
 
+# Servidores objetivo de descarga
 SERVIDORES_DESCARGA = [
     "datavaults.co",
     "filekeeper.net",
@@ -29,25 +29,24 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título dejando ÚNICAMENTE el nombre exacto del juego para que Hydra haga Match."""
+    """Limpia el título dejando ÚNICAMENTE el nombre del juego para que Hydra haga Match."""
     if not titulo_raw:
         return ""
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
     titulo = re.sub(r"[-|:]", " ", titulo)
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
-    titulo_limpio = re.sub(r"\s+", " ", titulo).strip()
-    return titulo_limpio
+    return re.sub(r"\s+", " ", titulo).strip()
 
 def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
+    """Abre el pastebin y extrae el texto desencriptado."""
     enlaces_encontrados = []
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
+    print(f"  -> Abriendo Pastebin: {url_pastebin}")
     
     page = context.new_page()
-    page.route("**/*.{png,jpg,jpeg,svg,gif,webp,css,woff,woff2,ttf,otf}", lambda route: route.abort())
-    
     try:
-        page.goto(url_pastebin, timeout=12000, wait_until="domcontentloaded")
-        page.wait_for_timeout(1200)
+        page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
 
         texto_desencriptado = page.evaluate("""() => {
             let texto = "";
@@ -79,11 +78,13 @@ def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     finally:
         page.close()
 
-    return list(set(enlaces_encontrados))
+    resultado = list(set(enlaces_encontrados))
+    print(f"     [EXITO] {len(resultado)} enlaces extraídos de este Pastebin.")
+    return resultado
 
 def extraer_datos_juego(context, url_juego: str) -> dict | None:
     try:
-        resp = scraper.get(url_juego, timeout=8)
+        resp = scraper.get(url_juego, timeout=10)
         if resp.status_code != 200:
             return None
 
@@ -148,31 +149,29 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
         print(f"Error procesando {url_juego}: {e}")
         return None
 
-def escnear_pagina_catalogo(pagina_num: int) -> set[str]:
-    urls = set()
-    p = BASE_URL if pagina_num == 1 else f"{BASE_URL}/page/{pagina_num}/"
-    try:
-        r = scraper.get(p, timeout=8)
-        if r.status_code == 200:
-            sp = BeautifulSoup(r.text, "html.parser")
-            for a in sp.find_all("a", href=True):
-                href = a["href"]
-                if "/app/" in href:
-                    if not href.startswith("http"):
-                        href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-                    urls.add(href)
-    except Exception as e:
-        print(f"Error en página {pagina_num}: {e}")
-    return urls
-
 def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
     urls = set()
-    print(f"Escaneando catálogo en paralelo...")
+    print(f"Escaneando exactamente {max_paginas} páginas del catálogo...")
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        resultados = executor.map(escnear_pagina_catalogo, range(1, max_paginas + 1))
-        for res in resultados:
-            urls.update(res)
+    for i in range(1, max_paginas + 1):
+        p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
+        try:
+            print(f"Escaneando catálogo ({i}/{max_paginas}): {p}")
+            r = scraper.get(p, timeout=12)
+            if r.status_code == 200:
+                sp = BeautifulSoup(r.text, "html.parser")
+                for a in sp.find_all("a", href=True):
+                    href = a["href"]
+                    if "/app/" in href:
+                        if not href.startswith("http"):
+                            href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
+                        urls.add(href)
+            elif r.status_code == 404:
+                print(f"Fin del catálogo en página {i}.")
+                break
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"Error en página {p}: {e}")
 
     return list(urls)
 
@@ -181,15 +180,17 @@ def generar_json():
     descargas_acumuladas = {}
 
     urls = obtener_urls_juegos(max_paginas=PAGINAS)
+    print(f"Total de URLs de juegos encontradas: {len(urls)}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 800, 'height': 600}
+            viewport={'width': 1280, 'height': 720}
         )
 
-        for url in urls:
+        for idx, url in enumerate(urls, 1):
+            print(f"[{idx}/{len(urls)}] Procesando: {url}")
             datos = extraer_datos_juego(context, url)
             if datos:
                 descargas_acumuladas[datos["title"]] = datos
