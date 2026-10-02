@@ -49,35 +49,45 @@ def extraer_datos_juego(url_juego):
             "uploadDate": fecha,
             "fileSize": tamano
         }
-    except Exception:
+    except Exception as e:
+        print(f"Error procesando {url_juego}: {e}")
         return None
 
 def generar_json():
-    respuesta = requests.get(BASE_URL, headers=HEADERS, timeout=10)
-    if respuesta.status_code != 200:
-        return
-
-    soup = BeautifulSoup(respuesta.text, "html.parser")
-    links_juegos = set()
-
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if BASE_URL in href and href != BASE_URL and not any(x in href for x in ["/page/", "/category/", "/tag/"]):
-            links_juegos.add(href)
-
+    print("Iniciando scraping en Elenemigos...")
     lista_descargas = []
-    for url in links_juegos:
-        datos = extraer_datos_juego(url)
-        if datos:
-            lista_descargas.append(datos)
+    
+    try:
+        respuesta = requests.get(BASE_URL, headers=HEADERS, timeout=10)
+        if respuesta.status_code == 200:
+            soup = BeautifulSoup(respuesta.text, "html.parser")
+            links_juegos = set()
+
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if BASE_URL in href and href != BASE_URL and not any(x in href for x in ["/page/", "/category/", "/tag/"]):
+                    links_juegos.add(href)
+
+            print(f"Se encontraron {len(links_juegos)} paginas de juegos.")
+            for url in links_juegos:
+                datos = extraer_datos_juego(url)
+                if datos:
+                    lista_descargas.append(datos)
+        else:
+            print(f"Error en respuesta HTTP: {respuesta.status_code}")
+    except Exception as e:
+        print(f"Error general en la conexion: {e}")
 
     fuente_hydra = {
         "name": "Elenemigos Public Source",
         "downloads": lista_descargas
     }
 
+    # Siempre crea el archivo elenemigos.json, incluso si la lista esta vacia
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-if __name__ == "__main__":
-    generar_json()
+    print("¡Archivo elenemigos.json generado con exito!")
+
+# Ejecucion principal sin errores de sangria
+generar_json()
