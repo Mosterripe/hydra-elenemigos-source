@@ -29,16 +29,19 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título dejando ÚNICAMENTE el nombre del juego para que Hydra haga Match."""
+    """Limpia el título dejando ÚNICAMENTE el nombre exacto del juego para el matching de Hydra."""
     if not titulo_raw:
         return ""
+    # Remover etiquetas típicas de títulos de páginas de descargas
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
-    titulo = re.sub(r"[-|:]", " ", titulo)
+    # Remover versiones, repacks y cracks
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
-    return re.sub(r"\s+", " ", titulo).strip()
+    # Limpiar guiones o caracteres residuales al inicio y final
+    titulo = re.sub(r"[-|:]", " ", titulo)
+    titulo_limpio = re.sub(r"\s+", " ", titulo).strip()
+    return titulo_limpio
 
 def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
-    """Abre el pastebin y extrae el texto desencriptado."""
     enlaces_encontrados = []
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
     print(f"  -> Abriendo Pastebin: {url_pastebin}")
@@ -78,9 +81,7 @@ def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     finally:
         page.close()
 
-    resultado = list(set(enlaces_encontrados))
-    print(f"     [EXITO] {len(resultado)} enlaces extraídos de este Pastebin.")
-    return resultado
+    return list(set(enlaces_encontrados))
 
 def extraer_datos_juego(context, url_juego: str) -> dict | None:
     try:
@@ -200,11 +201,9 @@ def generar_json():
     lista_final = list(descargas_acumuladas.values())
     lista_final.sort(key=lambda x: x["title"])
 
+    # Formato estándar de Hydra Launcher
     fuente_hydra = {
         "name": "Elenemigos Public Source",
-        "slug": "elenemigos-source",
-        "url": "https://elenemigos.com",
-        "iconUrl": "https://elenemigos.com/favicon.ico",
         "downloads": lista_final
     }
 
