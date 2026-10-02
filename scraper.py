@@ -9,7 +9,20 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-def extraer_datos_juego(url_juego):
+def limpiar_titulo(titulo_raw: str) -> str:
+    """Limpia el título para mejorar la coincidencia con Hydra Launcher."""
+    if not titulo_raw:
+        return "Juego Desconocido"
+    
+    # Quitar sufijos comunes del sitio
+    titulo = titulo_raw.replace(" - Descargar Gratis", "").replace(" - ElEnemigos", "").replace(" | ElEnemigos", "").replace("Descargar", "")
+    
+    # Eliminar versiones, repacks y marcas de agua habituales (ej. v1.0, Build 1234, etc.)
+    titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|build\s*\d+|repack|full|multi\d+|crack)\b.*", "", titulo)
+    titulo = re.sub(r"\s+", " ", titulo).strip()
+    return titulo
+
+def extraer_datos_juego(url_juego: str) -> dict | None:
     try:
         respuesta = requests.get(url_juego, headers=HEADERS, timeout=10)
         if respuesta.status_code != 200:
@@ -17,37 +30,36 @@ def extraer_datos_juego(url_juego):
 
         soup = BeautifulSoup(respuesta.text, "html.parser")
 
-        # Extraer el título del juego
-        titulo_tag = soup.find("h1") or soup.find("title")
-        if not titulo_tag:
+        # 1. Título
+        h1 = soup.find("h1") or soup.find("title")
+        if not h1:
             return None
         
-        # Limpieza básica del título para coincidencia con Hydra
-        titulo = titulo_tag.text.strip()
-        titulo = titulo.replace(" - Descargar Gratis", "").replace(" - ElEnemigos", "").replace(" | ElEnemigos", "")
-        titulo = re.sub(r"\s+v?\d+(\.\d+)*.*", "", titulo, flags=re.IGNORECASE).strip()
+        titulo = limpiar_titulo(h1.text)
+        if not titulo or len(titulo) < 2:
+            return None
 
-        # Extraer enlaces
+        # 2. Enlaces (uris)
         enlaces = []
         for a in soup.find_all("a", href=True):
             link = a["href"]
             if (
                 link.startswith("magnet:")
                 or link.endswith(".torrent")
-                or any(server in link for server in ["mediafire.com", "mega.nz", "1fichier.com", "pixeldrain.com", "gofile.io"])
+                or any(server in link for server in ["mediafire.com", "mega.nz", "1fichier.com", "pixeldrain.com", "gofile.io", "drive.google.com"])
             ):
                 if link not in enlaces:
                     enlaces.append(link)
 
-        # Si no tiene enlaces directos/magnet, guardamos la misma ficha como fuente temporal
+        # Si no detecta servidor directo, incluye la ficha como enlace de referencia
         if not enlaces:
             enlaces = [url_juego]
 
-        # Extraer tamaño
+        # 3. Tamaño aproximado
         tamano = "N/A"
-        coincidencia_tamano = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", soup.text, re.IGNORECASE)
-        if coincidencia_tamano:
-            tamano = coincidencia_tamano.group(1).upper()
+        coincidencia = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", soup.text, re.IGNORECASE)
+        if coincidencia:
+            tamano = coincidencia.group(1).upper()
 
         fecha = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -61,43 +73,47 @@ def extraer_datos_juego(url_juego):
         print(f"Error procesando {url_juego}: {e}")
         return None
 
-def generar_json():
-    print("Iniciando scraping en Elenemigos...")
-    lista_descargas = []
+def obtener_urls_juegos() -> set:
+    """Escanea la portada y las primeras paginas del catalogo para obtener mas juegos."""
+    urls_juegos = set()
     
-    try:
-        respuesta = requests.get(BASE_URL, headers=HEADERS, timeout=10)
-        if respuesta.status_code == 200:
-            soup = BeautifulSoup(respuesta.text, "html.parser")
-            links_juegos = set()
-
-            # Buscar especificamente enlaces con la estructura /app/ de Elenemigos
+    # Escanear las primeras 5 paginas del sitio
+    paginas_a_escanear = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 6)]
+    
+    for url_pagina in paginas_a_escanear:
+        try:
+            print(f"Buscando juegos en: {url_pagina}")
+            resp = requests.get(url_pagina, headers=HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+            
+            soup = BeautifulSoup(resp.text, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = a["href"]
-                if "/app/" in href:
+                # Detectar enlaces a fichas individuales
+                if "/app/" in href or ("elenemigos.com/" in href and not any(x in href for x in ["/category/", "/tag/", "/page/", "/contacto"])):
                     if not href.startswith("http"):
-                        href = BASE_URL + href if href.startswith("/") else BASE_URL + "/" + href
-                    links_juegos.add(href)
+                        href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
+                    if href != BASE_URL and href != f"{BASE_URL}/":
+                        urls_juegos.add(href)
+        except Exception as e:
+            print(f"Error escaneando pagina {url_pagina}: {e}")
 
-            print(f"Se encontraron {len(links_juegos)} juegos en portada.")
-            for url in links_juegos:
-                datos = extraer_datos_juego(url)
-                if datos:
-                    lista_descargas.append(datos)
-        else:
-            print(f"Error en respuesta HTTP: {respuesta.status_code}")
-    except Exception as e:
-        print(f"Error general en la conexion: {e}")
+    return urls_juegos
 
-    # Si por alguna razon la portada no arroja resultados, incluye una lista base
-    if not lista_descargas:
-        print("Agregando juego de prueba base...")
-        lista_descargas.append({
-            "title": "Alan Wake",
-            "uris": ["https://elenemigos.com/app/alan-wake-descargar-gratis/1782"],
-            "uploadDate": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "fileSize": "2.5 GB"
-        })
+def generar_json():
+    print("Iniciando scraping amplio de Elenemigos...")
+    urls_juegos = obtener_urls_juegos()
+    print(f"Total de juegos recopilados para procesar: {len(urls_juegos)}")
+
+    lista_descargas = []
+    for url in list(urls_juegos):
+        datos = extraer_datos_juego(url)
+        if datos:
+            lista_descargas.append(datos)
+
+    # Ordenar por titulo alfabetico
+    lista_descargas.sort(key=lambda x: x["title"])
 
     fuente_hydra = {
         "name": "Elenemigos Public Source",
@@ -107,7 +123,7 @@ def generar_json():
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-    print(f"¡Archivo elenemigos.json generado con exito con {len(lista_descargas)} juegos!")
+    print(f"¡Exito! Se genero 'elenemigos.json' con {len(lista_descargas)} juegos.")
 
 if __name__ == "__main__":
     generar_json()
