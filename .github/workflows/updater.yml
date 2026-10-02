@@ -2,18 +2,21 @@ name: Actualizar Fuente de Elenemigos
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Se ejecuta automáticamente todos los días a medianoche
-  workflow_dispatch: # Permite ejecutar el script manualmente cuando quieras
+    - cron: '0 0 * * *' # Todos los días a medianoche
+  workflow_dispatch: # Ejecución manual
+
+permissions:
+  contents: write # Permite que el bot haga push al repositorio
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Configurar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
