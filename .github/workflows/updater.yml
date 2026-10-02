@@ -2,11 +2,11 @@ name: Actualizar Fuente de Elenemigos
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Ejecución diaria a medianoche
-  workflow_dispatch: # Permite ejecutar el flujo manualmente
+    - cron: '0 0 * * *' # Todos los días a medianoche
+  workflow_dispatch:
 
 permissions:
-  contents: write # Concede permisos para subir cambios al repositorio
+  contents: write
 
 jobs:
   build:
@@ -18,12 +18,12 @@ jobs:
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install cloudscraper beautifulsoup4
 
       - name: Ejecutar Scraper
         run: python scraper.py
@@ -32,6 +32,6 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add elenemigos.json
-          git commit -m "Auto-update: Fuente de Elenemigos actualizada" || exit 0
+          git add .
+          git commit -m "Auto-update: Fuente de Elenemigos actualizada" || echo "No hay cambios para guardar"
           git push
