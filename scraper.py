@@ -4,10 +4,10 @@ import time
 from datetime import datetime
 import cloudscraper
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://elenemigos.com"
 
-# Lista exacta de servidores principales que utiliza Elenemigos
 SERVIDORES_DESCARGA = [
     "datavaults.co",
     "filekeeper.net",
@@ -15,28 +15,18 @@ SERVIDORES_DESCARGA = [
     "akirabox.to",
     "fileq.net",
     "mediafire.com",
-    # Servidores de respaldo habituales
     "mega.nz",
-    "mega.co.nz",
     "1fichier.com",
     "pixeldrain.com",
     "gofile.io",
-    "drive.google.com",
-    "qiwi.gg",
-    "terabox.com",
-    "krakenfiles.com"
+    "drive.google.com"
 ]
 
 scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    }
+    browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el nombre del juego para optimizar la coincidencia en Hydra Launcher."""
     if not titulo_raw:
         return ""
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
@@ -44,43 +34,48 @@ def limpiar_titulo(titulo_raw: str) -> str:
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
     return re.sub(r"\s+", " ", titulo).strip()
 
-def extraer_enlaces_de_pastebin(url_pastebin: str) -> list[str]:
-    """Accede al Pastebin de Elenemigos y extrae los enlaces a los servidores reales."""
+def extraer_enlaces_de_pastebin_con_browser(page, url_pastebin: str) -> list[str]:
+    """Usa un navegador real para cargar el JavaScript del Pastebin y extraer el texto."""
     enlaces_encontrados = []
     try:
-        print(f"  -> Extrayendo desde Pastebin: {url_pastebin}")
-        resp = scraper.get(url_pastebin, timeout=8)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            
-            # 1. Etiquetas <a> con los servidores objetivo
-            for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-                if href.startswith("magnet:") or any(s in href.lower() for s in SERVIDORES_DESCARGA):
-                    if href not in enlaces_encontrados:
-                        enlaces_encontrados.append(href)
+        print(f"  -> Abriendo Pastebin con Navegador: {url_pastebin}")
+        page.goto(url_pastebin, timeout=15000, wait_until="networkidle")
+        
+        # Esperar 2 segundos adicionales para asegurar renderizado de JS
+        page.wait_for_timeout(2000)
 
-            # 2. Expresión regular en texto plano para capturar URLs no hipervinculadas
-            patron_urls = r'https?://[^\s<>"]+'
-            urls_texto = re.findall(patron_urls, resp.text)
-            for u in urls_texto:
-                u_clean = u.rstrip(".,;)'\"")
-                if any(s in u_clean.lower() for s in SERVIDORES_DESCARGA):
-                    if u_clean not in enlaces_encontrados:
-                        enlaces_encontrados.append(u_clean)
+        # Obtener todo el HTML renderizado dinámicamente por JS
+        html_content = page.content()
+        soup = BeautifulSoup(html_content, "html.parser")
 
-            # 3. Enlaces Magnet en texto plano
-            magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s<>"]*', resp.text)
-            for m in magnets:
-                if m not in enlaces_encontrados:
-                    enlaces_encontrados.append(m)
+        # 1. Extraer de etiquetas <a>
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith("magnet:") or any(s in href.lower() for s in SERVIDORES_DESCARGA):
+                if href not in enlaces_encontrados:
+                    enlaces_encontrados.append(href)
+
+        # 2. Extraer URLs en texto plano renderizado
+        patron_urls = r'https?://[^\s<>"]+'
+        urls_texto = re.findall(patron_urls, html_content)
+        for u in urls_texto:
+            u_clean = u.rstrip(".,;)'\"")
+            if any(s in u_clean.lower() for s in SERVIDORES_DESCARGA):
+                if u_clean not in enlaces_encontrados:
+                    enlaces_encontrados.append(u_clean)
+
+        # 3. Extraer Magnets en texto plano
+        magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s<>"]*', html_content)
+        for m in magnets:
+            if m not in enlaces_encontrados:
+                enlaces_encontrados.append(m)
 
     except Exception as e:
-        print(f"Error procesando Pastebin {url_pastebin}: {e}")
-        
+        print(f"  Error cargando Pastebin {url_pastebin}: {e}")
+
     return enlaces_encontrados
 
-def extraer_datos_juego(url_juego: str) -> dict | None:
+def extraer_datos_juego(page, url_juego: str) -> dict | None:
     try:
         resp = scraper.get(url_juego, timeout=10)
         if resp.status_code != 200:
@@ -107,27 +102,26 @@ def extraer_datos_juego(url_juego: str) -> dict | None:
                     enlaces.append(href)
                 continue
 
-            # Si está directo en la ficha sin pasar por pastebin
             if any(server in href.lower() for server in SERVIDORES_DESCARGA):
                 if href not in enlaces:
                     enlaces.append(href)
                 continue
 
-            # Detectar enlaces de Pastebin / redirecciones internas
+            # Detectar enlaces al Pastebin
             if any(p in href.lower() for p in ["paste", "pastebin", "/go/", "/redirect/", "/links/", "/p/"]):
                 if not href.startswith("http"):
                     href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
                 pastes_a_procesar.add(href)
 
-        # Entrar a los pastebins encontrados
+        # Procesar los Pastebins con Playwright
         for url_paste in pastes_a_procesar:
-            enlaces_paste = extraer_enlaces_de_pastebin(url_paste)
+            enlaces_paste = extraer_enlaces_de_pastebin_con_browser(page, url_paste)
             for ep in enlaces_paste:
                 if ep not in enlaces:
                     enlaces.append(ep)
 
         if not enlaces:
-            print(f"Sin enlaces directos/servidores hallados para: {titulo}")
+            print(f"Sin enlaces capturados para: {titulo}")
             return None
 
         tamano = "N/A"
@@ -149,7 +143,7 @@ def extraer_datos_juego(url_juego: str) -> dict | None:
 
 def obtener_urls_juegos() -> list[str]:
     urls = set()
-    paginas = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 8)]
+    paginas = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 6)]
 
     for p in paginas:
         try:
@@ -170,18 +164,24 @@ def obtener_urls_juegos() -> list[str]:
     return list(urls)
 
 def generar_json():
-    print("Iniciando extracción con lista de servidores específicos...")
-    
+    print("Iniciando extracción de Pastebins con Playwright...")
     descargas_acumuladas = {}
 
     urls = obtener_urls_juegos()
     print(f"URLs de juegos encontradas: {len(urls)}")
 
-    for url in urls:
-        print(f"Procesando juego: {url}")
-        datos = extraer_datos_juego(url)
-        if datos:
-            descargas_acumuladas[datos["title"]] = datos
+    # Iniciar instancia de navegador Chromium
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        for url in urls:
+            print(f"Procesando juego: {url}")
+            datos = extraer_datos_juego(page, url)
+            if datos:
+                descargas_acumuladas[datos["title"]] = datos
+
+        browser.close()
 
     lista_final = list(descargas_acumuladas.values())
     lista_final.sort(key=lambda x: x["title"])
@@ -194,7 +194,7 @@ def generar_json():
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-    print(f"¡Proceso completado! Se guardaron {len(lista_final)} juegos con enlaces a {', '.join(SERVIDORES_DESCARGA[:6])}.")
+    print(f"¡Proceso completado! Se guardaron {len(lista_final)} juegos con los enlaces renderizados desde Pastebin.")
 
 if __name__ == "__main__":
     generar_json()
