@@ -1,34 +1,34 @@
 import json
 import re
-import xml.etree.ElementTree as ET
+import time
 from datetime import datetime
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 
-SITEMAP_URL = "https://elenemigos.com/sitemap.xml"
 BASE_URL = "https://elenemigos.com"
 
-# Cabeceras completas simulando un navegador real para evitar bloqueos Cloudflare/403
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive"
-}
+# Inicializar cloudscraper para evadir bloqueos de Cloudflare
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título para mejorar la coincidencia en Hydra Launcher."""
     if not titulo_raw:
         return ""
+    # Quitar etiquetas y marcas comunes
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
     titulo = re.sub(r"[-|:]", " ", titulo)
-    titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
+    # Limpiar versiones (v1.0, b12345, etc.) para que coincida con Hydra
+    titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
     return re.sub(r"\s+", " ", titulo).strip()
 
 def extraer_datos_juego(url_juego: str) -> dict | None:
     try:
-        resp = requests.get(url_juego, headers=HEADERS, timeout=10)
+        resp = scraper.get(url_juego, timeout=10)
         if resp.status_code != 200:
             return None
 
@@ -53,6 +53,7 @@ def extraer_datos_juego(url_juego: str) -> dict | None:
                 if link not in enlaces:
                     enlaces.append(link)
 
+        # Si no hay enlace directo expuesto, usar la URL del juego en la fuente
         if not enlaces:
             enlaces = [url_juego]
 
@@ -70,69 +71,55 @@ def extraer_datos_juego(url_juego: str) -> dict | None:
             "fileSize": tamano
         }
     except Exception as e:
-        print(f"Error extrayendo {url_juego}: {e}")
+        print(f"Error procesando {url_juego}: {e}")
         return None
 
-def obtener_urls() -> list[str]:
-    urls = []
-    # Intento 1: Obtener mediante Sitemap
-    try:
-        resp = requests.get(SITEMAP_URL, headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            root = ET.fromstring(resp.content)
-            for elem in root.iter():
-                if elem.tag.endswith("loc") and elem.text:
-                    u = elem.text.strip()
-                    if "/app/" in u or (BASE_URL in u and not any(x in u for x in ["/category/", "/tag/", "/page/", "sitemap"])):
-                        urls.append(u)
-    except Exception as e:
-        print(f"Aviso sitemap: {e}")
+def obtener_urls_juegos() -> list[str]:
+    urls = set()
+    # Recorrer las primeras paginas del sitio
+    paginas = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 8)]
 
-    # Intento 2: Paginación si el sitemap falla o devuelve pocos resultados
-    if len(urls) < 5:
-        print("Buscando mediante paginación del sitio...")
-        paginas = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 6)]
-        for p in paginas:
-            try:
-                r = requests.get(p, headers=HEADERS, timeout=10)
-                if r.status_code == 200:
-                    sp = BeautifulSoup(r.text, "html.parser")
-                    for a in sp.find_all("a", href=True):
-                        href = a["href"]
-                        if "/app/" in href:
-                            if not href.startswith("http"):
-                                href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-                            urls.append(href)
-            except Exception as e:
-                print(f"Error paginación {p}: {e}")
+    for p in paginas:
+        try:
+            print(f"Escaneando: {p}")
+            r = scraper.get(p, timeout=12)
+            if r.status_code == 200:
+                sp = BeautifulSoup(r.text, "html.parser")
+                for a in sp.find_all("a", href=True):
+                    href = a["href"]
+                    if "/app/" in href:
+                        if not href.startswith("http"):
+                            href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
+                        urls.add(href)
+            time.sleep(1) # Pausa amigable entre peticiones
+        except Exception as e:
+            print(f"Error escaneando {p}: {e}")
 
-    return list(set(urls))
+    return list(urls)
 
 def generar_json():
-    print("Iniciando actualización de la fuente de Elenemigos...")
+    print("Iniciando actualización con Cloudscraper...")
     
-    # Cargar JSON existente si está disponible como respaldo (fallback)
-    descargas_previas = {}
+    # Cargar juegos existentes para no perder historial
+    descargas_acumuladas = {}
     try:
         with open("elenemigos.json", "r", encoding="utf-8") as f:
-            datos_viejos = json.load(f)
-            for item in datos_viejos.get("downloads", []):
-                descargas_previas[item["title"]] = item
+            datos_previos = json.load(f)
+            for item in datos_previos.get("downloads", []):
+                descargas_acumuladas[item["title"]] = item
     except Exception:
         pass
 
-    urls = obtener_urls()
-    print(f"URLs detectadas para procesar: {len(urls)}")
+    urls = obtener_urls_juegos()
+    print(f"URLs de juegos encontradas: {len(urls)}")
 
-    NUEVAS_DESCARGAS = {}
-    for url in urls[:40]:  # Procesa las primeras 40 entradas por ciclo
+    for url in urls:
+        print(f"Procesando juego: {url}")
         datos = extraer_datos_juego(url)
         if datos:
-            NUEVAS_DESCARGAS[datos["title"]] = datos
+            descargas_acumuladas[datos["title"]] = datos
 
-    # Combinar juegos nuevos con los almacenados anteriormente
-    descargas_previas.update(NUEVAS_DESCARGAS)
-    lista_final = list(descargas_previas.values())
+    lista_final = list(descargas_acumuladas.values())
     lista_final.sort(key=lambda x: x["title"])
 
     fuente_hydra = {
@@ -143,7 +130,7 @@ def generar_json():
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-    print(f"¡Éxito! El archivo 'elenemigos.json' contiene {len(lista_final)} juegos acumulados.")
+    print(f"¡Proceso completado! Archivo actualizado con {len(lista_final)} juegos.")
 
 if __name__ == "__main__":
     generar_json()
