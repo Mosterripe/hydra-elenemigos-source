@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -9,7 +10,6 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "https://elenemigos.com"
 PASTE_DOMAIN = "paste.elenemigos.com"
 
-# Servidores objetivo de descarga
 SERVIDORES_DESCARGA = [
     "datavaults.co",
     "filekeeper.net",
@@ -29,24 +29,25 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
+    """Limpia el título dejando ÚNICAMENTE el nombre exacto del juego para que Hydra haga Match."""
     if not titulo_raw:
         return ""
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
     titulo = re.sub(r"[-|:]", " ", titulo)
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
     titulo_limpio = re.sub(r"\s+", " ", titulo).strip()
-    
-    return f"{titulo_limpio} [Clave: www.elenemigos.com]"
+    return titulo_limpio
 
 def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     enlaces_encontrados = []
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
-    print(f"  -> Abriendo Pastebin: {url_pastebin}")
     
     page = context.new_page()
+    page.route("**/*.{png,jpg,jpeg,svg,gif,webp,css,woff,woff2,ttf,otf}", lambda route: route.abort())
+    
     try:
-        page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
+        page.goto(url_pastebin, timeout=12000, wait_until="domcontentloaded")
+        page.wait_for_timeout(1200)
 
         texto_desencriptado = page.evaluate("""() => {
             let texto = "";
@@ -82,7 +83,7 @@ def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
 
 def extraer_datos_juego(context, url_juego: str) -> dict | None:
     try:
-        resp = scraper.get(url_juego, timeout=10)
+        resp = scraper.get(url_juego, timeout=8)
         if resp.status_code != 200:
             return None
 
@@ -147,24 +148,31 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
         print(f"Error procesando {url_juego}: {e}")
         return None
 
+def escnear_pagina_catalogo(pagina_num: int) -> set[str]:
+    urls = set()
+    p = BASE_URL if pagina_num == 1 else f"{BASE_URL}/page/{pagina_num}/"
+    try:
+        r = scraper.get(p, timeout=8)
+        if r.status_code == 200:
+            sp = BeautifulSoup(r.text, "html.parser")
+            for a in sp.find_all("a", href=True):
+                href = a["href"]
+                if "/app/" in href:
+                    if not href.startswith("http"):
+                        href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
+                    urls.add(href)
+    except Exception as e:
+        print(f"Error en página {pagina_num}: {e}")
+    return urls
+
 def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
     urls = set()
+    print(f"Escaneando catálogo en paralelo...")
 
-    for i in range(1, max_paginas + 1):
-        p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
-        try:
-            r = scraper.get(p, timeout=12)
-            if r.status_code == 200:
-                sp = BeautifulSoup(r.text, "html.parser")
-                for a in sp.find_all("a", href=True):
-                    href = a["href"]
-                    if "/app/" in href:
-                        if not href.startswith("http"):
-                            href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-                        urls.add(href)
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"Error en página {p}: {e}")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        resultados = executor.map(escnear_pagina_catalogo, range(1, max_paginas + 1))
+        for res in resultados:
+            urls.update(res)
 
     return list(urls)
 
@@ -178,7 +186,7 @@ def generar_json():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 720}
+            viewport={'width': 800, 'height': 600}
         )
 
         for url in urls:
@@ -191,7 +199,6 @@ def generar_json():
     lista_final = list(descargas_acumuladas.values())
     lista_final.sort(key=lambda x: x["title"])
 
-    # Estructura JSON estricta compatible con el validador de Hydra Launcher
     fuente_hydra = {
         "name": "Elenemigos Public Source",
         "slug": "elenemigos-source",
@@ -202,6 +209,8 @@ def generar_json():
 
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
+
+    print(f"¡Proceso completado! Se guardaron {len(lista_final)} juegos en elenemigos.json.")
 
 if __name__ == "__main__":
     generar_json()
