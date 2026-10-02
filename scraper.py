@@ -7,7 +7,26 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://elenemigos.com"
 
-# Inicializar cloudscraper para evadir bloqueos de Cloudflare
+# Lista exacta de servidores principales que utiliza Elenemigos
+SERVIDORES_DESCARGA = [
+    "datavaults.co",
+    "filekeeper.net",
+    "vikingfile.com",
+    "akirabox.to",
+    "fileq.net",
+    "mediafire.com",
+    # Servidores de respaldo habituales
+    "mega.nz",
+    "mega.co.nz",
+    "1fichier.com",
+    "pixeldrain.com",
+    "gofile.io",
+    "drive.google.com",
+    "qiwi.gg",
+    "terabox.com",
+    "krakenfiles.com"
+]
+
 scraper = cloudscraper.create_scraper(
     browser={
         'browser': 'chrome',
@@ -17,14 +36,49 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
+    """Limpia el nombre del juego para optimizar la coincidencia en Hydra Launcher."""
     if not titulo_raw:
         return ""
-    # Quitar etiquetas y marcas comunes
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
     titulo = re.sub(r"[-|:]", " ", titulo)
-    # Limpiar versiones (v1.0, b12345, etc.) para que coincida con Hydra
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
     return re.sub(r"\s+", " ", titulo).strip()
+
+def extraer_enlaces_de_pastebin(url_pastebin: str) -> list[str]:
+    """Accede al Pastebin de Elenemigos y extrae los enlaces a los servidores reales."""
+    enlaces_encontrados = []
+    try:
+        print(f"  -> Extrayendo desde Pastebin: {url_pastebin}")
+        resp = scraper.get(url_pastebin, timeout=8)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            
+            # 1. Etiquetas <a> con los servidores objetivo
+            for a in soup.find_all("a", href=True):
+                href = a["href"].strip()
+                if href.startswith("magnet:") or any(s in href.lower() for s in SERVIDORES_DESCARGA):
+                    if href not in enlaces_encontrados:
+                        enlaces_encontrados.append(href)
+
+            # 2. Expresión regular en texto plano para capturar URLs no hipervinculadas
+            patron_urls = r'https?://[^\s<>"]+'
+            urls_texto = re.findall(patron_urls, resp.text)
+            for u in urls_texto:
+                u_clean = u.rstrip(".,;)'\"")
+                if any(s in u_clean.lower() for s in SERVIDORES_DESCARGA):
+                    if u_clean not in enlaces_encontrados:
+                        enlaces_encontrados.append(u_clean)
+
+            # 3. Enlaces Magnet en texto plano
+            magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s<>"]*', resp.text)
+            for m in magnets:
+                if m not in enlaces_encontrados:
+                    enlaces_encontrados.append(m)
+
+    except Exception as e:
+        print(f"Error procesando Pastebin {url_pastebin}: {e}")
+        
+    return enlaces_encontrados
 
 def extraer_datos_juego(url_juego: str) -> dict | None:
     try:
@@ -43,19 +97,38 @@ def extraer_datos_juego(url_juego: str) -> dict | None:
             return None
 
         enlaces = []
-        for a in soup.find_all("a", href=True):
-            link = a["href"]
-            if (
-                link.startswith("magnet:")
-                or link.endswith(".torrent")
-                or any(server in link for server in ["mediafire.com", "mega.nz", "1fichier.com", "pixeldrain.com", "gofile.io", "drive.google.com"])
-            ):
-                if link not in enlaces:
-                    enlaces.append(link)
+        pastes_a_procesar = set()
 
-        # Si no hay enlace directo expuesto, usar la URL del juego en la fuente
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+
+            if href.startswith("magnet:") or href.endswith(".torrent"):
+                if href not in enlaces:
+                    enlaces.append(href)
+                continue
+
+            # Si está directo en la ficha sin pasar por pastebin
+            if any(server in href.lower() for server in SERVIDORES_DESCARGA):
+                if href not in enlaces:
+                    enlaces.append(href)
+                continue
+
+            # Detectar enlaces de Pastebin / redirecciones internas
+            if any(p in href.lower() for p in ["paste", "pastebin", "/go/", "/redirect/", "/links/", "/p/"]):
+                if not href.startswith("http"):
+                    href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
+                pastes_a_procesar.add(href)
+
+        # Entrar a los pastebins encontrados
+        for url_paste in pastes_a_procesar:
+            enlaces_paste = extraer_enlaces_de_pastebin(url_paste)
+            for ep in enlaces_paste:
+                if ep not in enlaces:
+                    enlaces.append(ep)
+
         if not enlaces:
-            enlaces = [url_juego]
+            print(f"Sin enlaces directos/servidores hallados para: {titulo}")
+            return None
 
         tamano = "N/A"
         coincidencia = re.search(r"(\d+(?:\.\d+)?\s*(?:GB|MB))", soup.text, re.IGNORECASE)
@@ -76,12 +149,11 @@ def extraer_datos_juego(url_juego: str) -> dict | None:
 
 def obtener_urls_juegos() -> list[str]:
     urls = set()
-    # Recorrer las primeras paginas del sitio
     paginas = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 8)]
 
     for p in paginas:
         try:
-            print(f"Escaneando: {p}")
+            print(f"Escaneando catálogo: {p}")
             r = scraper.get(p, timeout=12)
             if r.status_code == 200:
                 sp = BeautifulSoup(r.text, "html.parser")
@@ -91,24 +163,16 @@ def obtener_urls_juegos() -> list[str]:
                         if not href.startswith("http"):
                             href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
                         urls.add(href)
-            time.sleep(1) # Pausa amigable entre peticiones
+            time.sleep(1)
         except Exception as e:
             print(f"Error escaneando {p}: {e}")
 
     return list(urls)
 
 def generar_json():
-    print("Iniciando actualización con Cloudscraper...")
+    print("Iniciando extracción con lista de servidores específicos...")
     
-    # Cargar juegos existentes para no perder historial
     descargas_acumuladas = {}
-    try:
-        with open("elenemigos.json", "r", encoding="utf-8") as f:
-            datos_previos = json.load(f)
-            for item in datos_previos.get("downloads", []):
-                descargas_acumuladas[item["title"]] = item
-    except Exception:
-        pass
 
     urls = obtener_urls_juegos()
     print(f"URLs de juegos encontradas: {len(urls)}")
@@ -130,7 +194,7 @@ def generar_json():
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-    print(f"¡Proceso completado! Archivo actualizado con {len(lista_final)} juegos.")
+    print(f"¡Proceso completado! Se guardaron {len(lista_final)} juegos con enlaces a {', '.join(SERVIDORES_DESCARGA[:6])}.")
 
 if __name__ == "__main__":
     generar_json()
