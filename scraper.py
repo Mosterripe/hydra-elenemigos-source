@@ -29,7 +29,6 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el nombre del juego y le añade la clave de descompresión para Hydra Launcher."""
     if not titulo_raw:
         return ""
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
@@ -39,23 +38,18 @@ def limpiar_titulo(titulo_raw: str) -> str:
     
     return f"{titulo_limpio} [Clave: www.elenemigos.com]"
 
-def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
-    """Carga el pastebin y extrae el contenido descifrado de la memoria de la pagina."""
+def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     enlaces_encontrados = []
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
     print(f"  -> Abriendo Pastebin: {url_pastebin}")
     
+    page = context.new_page()
     try:
-        # Cargar la página
-        response = page.goto(url_pastebin, timeout=25000, wait_until="domcontentloaded")
-        
-        # Esperar 5 segundos para asegurar la ejecucion del JS de descifrado
-        page.wait_for_timeout(5000)
+        page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
 
-        # 1. Extraer mediante Javascript ejecutado en la consola de la pagina
         texto_desencriptado = page.evaluate("""() => {
             let texto = "";
-            // Elementos tipicos donde PrivateBin/Pastebin coloca el texto libre
             let elClear = document.querySelector('#cleartext') || document.querySelector('#deletelink') || document.querySelector('#pastebytes');
             if (elClear) texto += " " + (elClear.innerText || elClear.value || "");
             
@@ -65,7 +59,6 @@ def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
             return texto + " " + document.body.innerText;
         }""")
 
-        # 2. Buscar coincidencias de nuestros servidores en el texto extraido
         patron_general = r'https?://[^\s<>"]+'
         urls_general = re.findall(patron_general, texto_desencriptado)
         for u in urls_general:
@@ -74,7 +67,6 @@ def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
                 if u_clean not in enlaces_encontrados:
                     enlaces_encontrados.append(u_clean)
 
-        # 3. Buscar enlaces Magnet
         magnets = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s<>"]*', texto_desencriptado)
         for m in magnets:
             m_clean = m.rstrip(";:,. \"'")
@@ -83,12 +75,12 @@ def extraer_enlaces_de_pastebin(page, url_pastebin: str) -> list[str]:
 
     except Exception as e:
         print(f"  [ERROR] Fallo al procesar Pastebin {url_pastebin}: {e}")
+    finally:
+        page.close()
 
-    resultado = list(set(enlaces_encontrados))
-    print(f"     [EXITO] {len(resultado)} enlaces extraídos de este Pastebin.")
-    return resultado
+    return list(set(enlaces_encontrados))
 
-def extraer_datos_juego(page, url_juego: str) -> dict | None:
+def extraer_datos_juego(context, url_juego: str) -> dict | None:
     try:
         resp = scraper.get(url_juego, timeout=10)
         if resp.status_code != 200:
@@ -122,7 +114,6 @@ def extraer_datos_juego(page, url_juego: str) -> dict | None:
                     enlaces.append(href_clean)
                 continue
 
-            # Detectar enlaces al subdominio paste.elenemigos.com
             if PASTE_DOMAIN in href or "/paste" in href.lower():
                 if not href.startswith("http"):
                     href = "https://" + href if href.startswith(PASTE_DOMAIN) else BASE_URL + href
@@ -130,15 +121,13 @@ def extraer_datos_juego(page, url_juego: str) -> dict | None:
                 href_limpio = href.rstrip(";:,. \"'")
                 pastes_a_procesar.add(href_limpio)
 
-        # Procesar los Pastebins encontrados con Playwright
         for url_paste in pastes_a_procesar:
-            enlaces_paste = extraer_enlaces_de_pastebin(page, url_paste)
+            enlaces_paste = extraer_enlaces_de_pastebin(context, url_paste)
             for ep in enlaces_paste:
                 if ep not in enlaces:
                     enlaces.append(ep)
 
         if not enlaces:
-            print(f"Sin enlaces capturados para: {titulo}")
             return None
 
         tamano = "N/A"
@@ -158,13 +147,12 @@ def extraer_datos_juego(page, url_juego: str) -> dict | None:
         print(f"Error procesando {url_juego}: {e}")
         return None
 
-def obtener_urls_juegos() -> list[str]:
+def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
     urls = set()
-    paginas = [BASE_URL] + [f"{BASE_URL}/page/{i}/" for i in range(2, 6)]
 
-    for p in paginas:
+    for i in range(1, max_paginas + 1):
+        p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
         try:
-            print(f"Escaneando catálogo: {p}")
             r = scraper.get(p, timeout=12)
             if r.status_code == 200:
                 sp = BeautifulSoup(r.text, "html.parser")
@@ -174,31 +162,27 @@ def obtener_urls_juegos() -> list[str]:
                         if not href.startswith("http"):
                             href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
                         urls.add(href)
-            time.sleep(1)
+            time.sleep(0.3)
         except Exception as e:
-            print(f"Error escaneando {p}: {e}")
+            print(f"Error en página {p}: {e}")
 
     return list(urls)
 
 def generar_json():
-    print("Iniciando extracción con perfil de navegador completo...")
+    PAGINAS = 5 
     descargas_acumuladas = {}
 
-    urls = obtener_urls_juegos()
-    print(f"URLs de juegos encontradas: {len(urls)}")
+    urls = obtener_urls_juegos(max_paginas=PAGINAS)
 
     with sync_playwright() as p:
-        # Lanzar Chromium configurando un User-Agent de navegador real para evitar bloqueos
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={'width': 1280, 'height': 720}
         )
-        page = context.new_page()
 
         for url in urls:
-            print(f"Procesando juego: {url}")
-            datos = extraer_datos_juego(page, url)
+            datos = extraer_datos_juego(context, url)
             if datos:
                 descargas_acumuladas[datos["title"]] = datos
 
@@ -207,15 +191,17 @@ def generar_json():
     lista_final = list(descargas_acumuladas.values())
     lista_final.sort(key=lambda x: x["title"])
 
+    # Estructura JSON estricta compatible con el validador de Hydra Launcher
     fuente_hydra = {
         "name": "Elenemigos Public Source",
+        "slug": "elenemigos-source",
+        "url": "https://elenemigos.com",
+        "iconUrl": "https://elenemigos.com/favicon.ico",
         "downloads": lista_final
     }
 
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
-
-    print(f"¡Proceso completado! Se guardaron {len(lista_final)} juegos en elenemigos.json.")
 
 if __name__ == "__main__":
     generar_json()
