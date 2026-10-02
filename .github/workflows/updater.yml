@@ -2,11 +2,11 @@ name: Actualizar Fuente de Elenemigos
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Todos los días a medianoche
-  workflow_dispatch: # Ejecución manual
+    - cron: '0 0 * * *' # Ejecución diaria a medianoche
+  workflow_dispatch: # Permite ejecutar el flujo manualmente
 
 permissions:
-  contents: write # Permite que el bot haga push al repositorio
+  contents: write # Concede permisos para subir cambios al repositorio
 
 jobs:
   build:
