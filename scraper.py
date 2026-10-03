@@ -2,14 +2,13 @@ import json
 import re
 import time
 from datetime import datetime
-import cloudscraper
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://elenemigos.com"
 PASTE_DOMAIN = "paste.elenemigos.com"
 
-# Servidores objetivo de descarga reconociendo los hosts aceptados por Hydra
+# Servidores objetivo de descarga reconocidos por Hydra
 SERVIDORES_DESCARGA = [
     "datavaults.co",
     "filekeeper.net",
@@ -23,10 +22,6 @@ SERVIDORES_DESCARGA = [
     "gofile.io",
     "drive.google.com"
 ]
-
-scraper = cloudscraper.create_scraper(
-    browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-)
 
 def limpiar_titulo(titulo_raw: str) -> str:
     """Limpia el título dejando ÚNICAMENTE el nombre comercial limpio para Hydra."""
@@ -80,13 +75,15 @@ def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
 
     return list(set(enlaces_encontrados))
 
-def extraer_datos_juego(context, url_juego: str) -> dict | None:
+def extraer_datos_juego(page, url_juego: str) -> dict | None:
     try:
-        resp = scraper.get(url_juego, timeout=10)
-        if resp.status_code != 200:
+        response = page.goto(url_juego, timeout=20000, wait_until="domcontentloaded")
+        if not response or response.status in [403, 404]:
+            print(f"  [OMITIDO] Estado {response.status if response else 'Sin respuesta'} en {url_juego}")
             return None
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = page.content()
+        soup = BeautifulSoup(html, "html.parser")
 
         h1 = soup.find("h1") or soup.find("title")
         if not h1:
@@ -121,6 +118,7 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
                 href_limpio = href.rstrip(";:,. \"'")
                 pastes_a_procesar.add(href_limpio)
 
+        context = page.context
         for url_paste in pastes_a_procesar:
             enlaces_paste = extraer_enlaces_de_pastebin(context, url_paste)
             for ep in enlaces_paste:
@@ -147,35 +145,39 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
         print(f"Error procesando {url_juego}: {e}")
         return None
 
-def obtener_urls_juegos(max_paginas: int = 299) -> list[str]:
+def obtener_urls_juegos(page, max_paginas: int = 299) -> list[str]:
     urls = set()
-    print(f"Escaneando las {max_paginas} páginas del catálogo con cloudscraper...")
+    print(f"Escaneando las {max_paginas} páginas del catálogo con navegador real...")
 
     for i in range(1, max_paginas + 1):
         p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
         try:
             print(f"Escaneando catálogo ({i}/{max_paginas}): {p}")
-            r = scraper.get(p, timeout=15)
-            if r.status_code == 200:
-                sp = BeautifulSoup(r.text, "html.parser")
-                encontrados_pag = 0
-                for a in sp.find_all("a", href=True):
-                    href = a["href"]
-                    # Capturar cualquier enlace de juego (generalmente contienen /app/ o la URL directa)
-                    if "/app/" in href or "elenemigos.com/" in href:
-                        # Excluir URLs del sistema como paginación o categorías generales
-                        if not any(x in href for x in ["/page/", "/category/", "/tag/", "/contact", "/privacy"]):
-                            if not href.startswith("http"):
-                                href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-                            if href not in urls and href != BASE_URL and href != f"{BASE_URL}/":
-                                urls.add(href)
-                                encontrados_pag += 1
-                print(f"  -> Encontrados {encontrados_pag} juegos en esta página.")
-            else:
-                print(f"  [Aviso] La página {p} respondió con código HTTP {r.status_code}")
+            response = page.goto(p, timeout=25000, wait_until="domcontentloaded")
+            
+            # Continuar en caso de errores de respuesta 403 o 404
+            if response and response.status not in [200, 301, 302]:
+                print(f"  [Aviso] La página {p} devolvió estado HTTP {response.status}. Continuando...")
+                time.sleep(1)
+                continue
+
+            html = page.content()
+            sp = BeautifulSoup(html, "html.parser")
+            encontrados_pag = 0
+            
+            for a in sp.find_all("a", href=True):
+                href = a["href"]
+                if "/app/" in href or "elenemigos.com/" in href:
+                    if not any(x in href for x in ["/page/", "/category/", "/tag/", "/contact", "/privacy", "/guide", "/faq"]):
+                        if not href.startswith("http"):
+                            href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
+                        if href not in urls and href != BASE_URL and href != f"{BASE_URL}/":
+                            urls.add(href)
+                            encontrados_pag += 1
+            print(f"  -> Encontrados {encontrados_pag} juegos en esta página.")
             time.sleep(0.5)
         except Exception as e:
-            print(f"Error en página {p}: {e}")
+            print(f"  [Excepción] Fallo al cargar página {i}: {e}")
 
     return list(urls)
 
@@ -183,19 +185,23 @@ def generar_json():
     PAGINAS = 299 
     descargas_acumuladas = {}
 
-    urls = obtener_urls_juegos(max_paginas=PAGINAS)
-    print(f"Total de URLs de juegos encontradas en el catálogo completo: {len(urls)}")
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={'width': 1280, 'height': 720}
         )
+        
+        main_page = context.new_page()
+        main_page.route("**/*.{png,jpg,jpeg,svg,gif,webp,css,woff,woff2,ttf,otf}", lambda route: route.abort())
+
+        # Obtener todas las URLs tolerando errores 403 / 404
+        urls = obtener_urls_juegos(main_page, max_paginas=PAGINAS)
+        print(f"\nTotal de URLs de juegos recolectadas: {len(urls)}\n")
 
         for idx, url in enumerate(urls, 1):
             print(f"[{idx}/{len(urls)}] Procesando juego: {url}")
-            datos = extraer_datos_juego(context, url)
+            datos = extraer_datos_juego(main_page, url)
             if datos:
                 descargas_acumuladas[datos["title"]] = datos
 
@@ -212,7 +218,7 @@ def generar_json():
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-    print(f"¡Proceso completado con éxito! Se guardaron {len(lista_final)} juegos en elenemigos.json.")
+    print(f"\n¡Proceso completado! Se guardaron {len(lista_final)} juegos en elenemigos.json.")
 
 if __name__ == "__main__":
     generar_json()
