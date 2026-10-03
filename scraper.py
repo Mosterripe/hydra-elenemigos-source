@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "https://elenemigos.com"
 PASTE_DOMAIN = "paste.elenemigos.com"
 
-# Servidores objetivo de descarga reconociendo los hosts aceptados por Hydra
+# Servidores objetivo de descarga reconocidos por Hydra
 SERVIDORES_DESCARGA = [
     "datavaults.co",
     "filekeeper.net",
@@ -29,7 +29,7 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título dejando ÚNICAMENTE el nombre comercial limpio para Hydra."""
+    """Limpia el título dejando ÚNICAMENTE el nombre comercial limpio para el matching de Hydra."""
     if not titulo_raw:
         return ""
     # Quitar palabras descriptivas de la web
@@ -48,7 +48,7 @@ def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     page = context.new_page()
     try:
         page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(3500)
 
         texto_desencriptado = page.evaluate("""() => {
             let texto = "";
@@ -149,9 +149,9 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
         print(f"Error procesando {url_juego}: {e}")
         return None
 
-def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
+def obtener_urls_juegos(max_paginas: int = 299) -> list[str]:
     urls = set()
-    print(f"Escaneando {max_paginas} páginas del catálogo...")
+    print(f"Iniciando escaneo continuo de las {max_paginas} páginas del catálogo...")
 
     for i in range(1, max_paginas + 1):
         p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
@@ -166,18 +166,19 @@ def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
                         if not href.startswith("http"):
                             href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
                         urls.add(href)
-            time.sleep(1)
+            time.sleep(0.4)
         except Exception as e:
             print(f"Error en página {p}: {e}")
 
     return list(urls)
 
 def generar_json():
-    PAGINAS = 5 
+    # Configurado a 299 páginas del catálogo completo
+    PAGINAS = 299 
     descargas_acumuladas = {}
 
     urls = obtener_urls_juegos(max_paginas=PAGINAS)
-    print(f"Total de URLs de juegos encontradas: {len(urls)}")
+    print(f"Total de URLs de juegos encontradas en el catálogo: {len(urls)}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -187,7 +188,7 @@ def generar_json():
         )
 
         for idx, url in enumerate(urls, 1):
-            print(f"[{idx}/{len(urls)}] Procesando: {url}")
+            print(f"[{idx}/{len(urls)}] Procesando juego: {url}")
             datos = extraer_datos_juego(context, url)
             if datos:
                 descargas_acumuladas[datos["title"]] = datos
@@ -199,15 +200,13 @@ def generar_json():
 
     fuente_hydra = {
         "name": "Elenemigos Public Source",
-        "slug": "elenemigos-source",
-        "url": "https://elenemigos.com",
         "downloads": lista_final
     }
 
     with open("elenemigos.json", "w", encoding="utf-8") as f:
         json.dump(fuente_hydra, f, ensure_ascii=False, indent=2)
 
-    print(f"¡Proceso completado! Se guardaron {len(lista_final)} juegos en elenemigos.json.")
+    print(f"¡Proceso completado con éxito! Se guardaron {len(lista_final)} juegos en elenemigos.json.")
 
 if __name__ == "__main__":
     generar_json()
