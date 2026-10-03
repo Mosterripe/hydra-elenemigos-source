@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 BASE_URL = "https://elenemigos.com"
 PASTE_DOMAIN = "paste.elenemigos.com"
 
-# Servidores objetivo de descarga
+# Servidores objetivo de descarga reconociendo los hosts aceptados por Hydra
 SERVIDORES_DESCARGA = [
     "datavaults.co",
     "filekeeper.net",
@@ -29,14 +29,14 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título dejando ÚNICAMENTE el nombre exacto del juego para el matching de Hydra."""
+    """Limpia el título dejando ÚNICAMENTE el nombre comercial del juego."""
     if not titulo_raw:
         return ""
-    # Remover etiquetas típicas de títulos de páginas de descargas
+    # Quitar palabras descriptivas de la web
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
-    # Remover versiones, repacks y cracks
-    titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+)\b.*", "", titulo)
-    # Limpiar guiones o caracteres residuales al inicio y final
+    # Quitar versiones, builds, cracks y updates
+    titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+|update\s*\d*)\b.*", "", titulo)
+    # Quitar caracteres especiales residuales
     titulo = re.sub(r"[-|:]", " ", titulo)
     titulo_limpio = re.sub(r"\s+", " ", titulo).strip()
     return titulo_limpio
@@ -142,9 +142,9 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
 
         return {
             "title": titulo,
-            "uris": enlaces,
+            "fileSize": tamano,
             "uploadDate": fecha,
-            "fileSize": tamano
+            "uris": enlaces
         }
     except Exception as e:
         print(f"Error procesando {url_juego}: {e}")
@@ -201,7 +201,6 @@ def generar_json():
     lista_final = list(descargas_acumuladas.values())
     lista_final.sort(key=lambda x: x["title"])
 
-    # Formato estándar de Hydra Launcher
     fuente_hydra = {
         "name": "Elenemigos Public Source",
         "downloads": lista_final
