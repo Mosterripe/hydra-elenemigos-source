@@ -29,7 +29,7 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título dejando ÚNICAMENTE el nombre comercial del juego."""
+    """Limpia el título dejando ÚNICAMENTE el nombre comercial limpio para Hydra."""
     if not titulo_raw:
         return ""
     # Quitar palabras descriptivas de la web
@@ -37,14 +37,13 @@ def limpiar_titulo(titulo_raw: str) -> str:
     # Quitar versiones, builds, cracks y updates
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+|update\s*\d*)\b.*", "", titulo)
     # Quitar caracteres especiales residuales
-    titulo = re.sub(r"[-|:]", " ", titulo)
+    titulo = re.sub(r"[-|:_]", " ", titulo)
     titulo_limpio = re.sub(r"\s+", " ", titulo).strip()
     return titulo_limpio
 
 def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     enlaces_encontrados = []
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
-    print(f"  -> Abriendo Pastebin: {url_pastebin}")
     
     page = context.new_page()
     try:
@@ -142,9 +141,9 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
 
         return {
             "title": titulo,
-            "fileSize": tamano,
+            "uris": enlaces,
             "uploadDate": fecha,
-            "uris": enlaces
+            "fileSize": tamano
         }
     except Exception as e:
         print(f"Error procesando {url_juego}: {e}")
@@ -152,7 +151,7 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
 
 def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
     urls = set()
-    print(f"Escaneando exactamente {max_paginas} páginas del catálogo...")
+    print(f"Escaneando {max_paginas} páginas del catálogo...")
 
     for i in range(1, max_paginas + 1):
         p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
@@ -167,10 +166,7 @@ def obtener_urls_juegos(max_paginas: int = 5) -> list[str]:
                         if not href.startswith("http"):
                             href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
                         urls.add(href)
-            elif r.status_code == 404:
-                print(f"Fin del catálogo en página {i}.")
-                break
-            time.sleep(0.3)
+            time.sleep(1)
         except Exception as e:
             print(f"Error en página {p}: {e}")
 
@@ -203,6 +199,8 @@ def generar_json():
 
     fuente_hydra = {
         "name": "Elenemigos Public Source",
+        "slug": "elenemigos-source",
+        "url": "https://elenemigos.com",
         "downloads": lista_final
     }
 
