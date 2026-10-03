@@ -29,14 +29,11 @@ scraper = cloudscraper.create_scraper(
 )
 
 def limpiar_titulo(titulo_raw: str) -> str:
-    """Limpia el título dejando ÚNICAMENTE el nombre comercial limpio para el matching de Hydra."""
+    """Limpia el título dejando ÚNICAMENTE el nombre comercial limpio para Hydra."""
     if not titulo_raw:
         return ""
-    # Quitar palabras descriptivas de la web
     titulo = re.sub(r"(?i)\b(descargar|gratis|pc|elenemigos|el\s*enemigos)\b", "", titulo_raw)
-    # Quitar versiones, builds, cracks y updates
     titulo = re.sub(r"(?i)\b(v?\d+(\.\d+)+|b\d+|build\s*\d+|repack|full|crack|multi\d+|update\s*\d*)\b.*", "", titulo)
-    # Quitar caracteres especiales residuales
     titulo = re.sub(r"[-|:_]", " ", titulo)
     titulo_limpio = re.sub(r"\s+", " ", titulo).strip()
     return titulo_limpio
@@ -46,9 +43,10 @@ def extraer_enlaces_de_pastebin(context, url_pastebin: str) -> list[str]:
     url_pastebin = url_pastebin.rstrip(";:,. \"'")
     
     page = context.new_page()
+    page.route("**/*.{png,jpg,jpeg,svg,gif,webp,css,woff,woff2,ttf,otf}", lambda route: route.abort())
     try:
         page.goto(url_pastebin, timeout=20000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3500)
+        page.wait_for_timeout(3000)
 
         texto_desencriptado = page.evaluate("""() => {
             let texto = "";
@@ -149,36 +147,40 @@ def extraer_datos_juego(context, url_juego: str) -> dict | None:
         print(f"Error procesando {url_juego}: {e}")
         return None
 
-def obtener_urls_juegos(max_paginas: int = 299) -> list[str]:
+def obtener_urls_juegos_con_playwright(context, max_paginas: int = 299) -> list[str]:
     urls = set()
-    print(f"Iniciando escaneo continuo de las {max_paginas} páginas del catálogo...")
+    print(f"Escaneando las {max_paginas} páginas del catálogo con Playwright...")
+    page = context.new_page()
+    page.route("**/*.{png,jpg,jpeg,svg,gif,webp,css,woff,woff2,ttf,otf}", lambda route: route.abort())
 
     for i in range(1, max_paginas + 1):
         p = BASE_URL if i == 1 else f"{BASE_URL}/page/{i}/"
         try:
             print(f"Escaneando catálogo ({i}/{max_paginas}): {p}")
-            r = scraper.get(p, timeout=12)
-            if r.status_code == 200:
-                sp = BeautifulSoup(r.text, "html.parser")
-                for a in sp.find_all("a", href=True):
-                    href = a["href"]
-                    if "/app/" in href:
-                        if not href.startswith("http"):
-                            href = BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-                        urls.add(href)
-            time.sleep(0.4)
-        except Exception as e:
-            print(f"Error en página {p}: {e}")
+            page.goto(p, timeout=15000, wait_until="domcontentloaded")
+            
+            hrefs = page.evaluate("""() => {
+                let links = [];
+                document.querySelectorAll('a[href]').forEach(a => links.push(a.href));
+                return links;
+            }""")
 
+            encontrados = 0
+            for href in hrefs:
+                if "/app/" in href:
+                    if href not in urls:
+                        urls.add(href)
+                        encontrados += 1
+            print(f"  -> Encontrados {encontrados} juegos en esta página.")
+        except Exception as e:
+            print(f"  [ERROR] Fallo al cargar página {i}: {e}")
+
+    page.close()
     return list(urls)
 
 def generar_json():
-    # Configurado a 299 páginas del catálogo completo
     PAGINAS = 299 
     descargas_acumuladas = {}
-
-    urls = obtener_urls_juegos(max_paginas=PAGINAS)
-    print(f"Total de URLs de juegos encontradas en el catálogo: {len(urls)}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -186,6 +188,10 @@ def generar_json():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={'width': 1280, 'height': 720}
         )
+
+        # Usar navegador headless para obtener todas las URLs del catálogo
+        urls = obtener_urls_juegos_con_playwright(context, max_paginas=PAGINAS)
+        print(f"Total de URLs de juegos encontradas en el catálogo completo: {len(urls)}")
 
         for idx, url in enumerate(urls, 1):
             print(f"[{idx}/{len(urls)}] Procesando juego: {url}")
